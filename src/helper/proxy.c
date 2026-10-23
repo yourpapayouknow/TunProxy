@@ -28,8 +28,10 @@ static int vlcfg(const char *host, const char *port) {
     return inet_pton(AF_INET6, host, &a6) == 1 && !memcmp(a6.s6_addr, prefix, sizeof(prefix));
 }
 
-/* 复用现有 PF_ROUTE 机制构造接口路由。 */
-static size_t rtmsg(unsigned char *buffer, int family, int upper, int action, unsigned index) {
+enum { RT4COUNT = 8, RT6COUNT = 10, RTCOUNT = RT4COUNT + RT6COUNT };
+
+/* 构造非零键捕获路由，保留 Darwin 按零地址回查的物理默认路由。 */
+static size_t rtmsg(unsigned char *buffer, int family, int part, int action, unsigned index) {
     memset(buffer, 0, 512);
     struct rt_msghdr *header = (void *)buffer;
     header->rtm_version = RTM_VERSION;
@@ -37,20 +39,24 @@ static size_t rtmsg(unsigned char *buffer, int family, int upper, int action, un
     header->rtm_index = index;
     header->rtm_flags = RTF_UP | RTF_STATIC;
     header->rtm_pid = getpid();
-    header->rtm_seq = upper + family * 10 + action * 100;
+    header->rtm_seq = part + family * 10 + action * 100;
     header->rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK;
     unsigned char *cursor = buffer + sizeof(*header);
     size_t size = family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
     unsigned char dst[sizeof(struct sockaddr_in6)] = {0};
     dst[0] = size;
     dst[1] = family;
-    dst[family == AF_INET ? 4 : 8] = upper ? 128 : 0;
+    unsigned offset = family == AF_INET ? 4 : 8;
+    if (part < 8) dst[offset] = 1u << part;
+    else inet_pton(AF_INET6, part == 8 ? "64:ff9b::" : "64:ff9b:1::", dst + offset);
     memcpy(cursor, dst, size);
     cursor += size;
     struct sockaddr_dl gateway = {.sdl_len = sizeof(gateway), .sdl_family = AF_LINK, .sdl_index = index};
     memcpy(cursor, &gateway, sizeof(gateway));
     cursor += sizeof(gateway);
-    dst[family == AF_INET ? 4 : 8] = 128;
+    memset(dst + offset, 0, family == AF_INET ? 4 : 16);
+    if (part < 8) dst[offset] = 256u - (1u << part);
+    else memset(dst + offset, 255, part == 8 ? 12 : 6);
     memcpy(cursor, dst, size);
     cursor += size;
     header->rtm_msglen = cursor - buffer;
@@ -68,19 +74,35 @@ int main(void) {
     for (unsigned i = 0; i < sizeof(bad) / sizeof(*bad); i++) if (vlcfg("100.64.0.1", bad[i])) return 2;
     if (vlcfg("127.0.0.1", "7897") || vlcfg("100.128.0.1", "7897") || vlcfg("host\nport: 1", "7897")) return 3;
     for (int family = AF_INET; family <= AF_INET6; family += AF_INET6 - AF_INET) {
-        for (int upper = 0; upper < 2; upper++) {
-            size_t size = rtmsg(buffer, family, upper, RTM_ADD, 7);
+        unsigned matches[256] = {0};
+        for (int part = 0; part < 8; part++) {
+            size_t size = rtmsg(buffer, family, part, RTM_ADD, 7);
             struct rt_msghdr *header = (void *)buffer;
             unsigned offset = family == AF_INET ? 4 : 8;
             if (header->rtm_msglen != size || header->rtm_index != 7) return 4;
-            if (buffer[sizeof(*header) + offset] != (upper ? 128 : 0)) return 5;
+            if (!buffer[sizeof(*header) + offset]) return 8;
+            if (buffer[sizeof(*header) + offset] != (1u << part)) return 5;
             size_t addrsize = family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
-            if (buffer[sizeof(*header) + addrsize + sizeof(struct sockaddr_dl) + offset] != 128) return 6;
+            if (buffer[sizeof(*header) + addrsize + sizeof(struct sockaddr_dl) + offset] != 256u - (1u << part)) return 6;
+            unsigned char *dst = buffer + sizeof(*header) + offset;
+            unsigned char *mask = buffer + sizeof(*header) + addrsize + sizeof(struct sockaddr_dl) + offset;
+            for (unsigned byte = 0; byte < 256; byte++) if ((byte & *mask) == *dst) matches[byte]++;
+            for (unsigned byte = 1; byte < (family == AF_INET ? 4u : 16u); byte++) if (dst[byte] || mask[byte]) return 9;
         }
+        if (matches[0]) return 10;
+        for (int byte = 1; byte < 256; byte++) if (matches[byte] != 1) return 11;
+    }
+    for (int part = 8; part < RT6COUNT; part++) {
+        rtmsg(buffer, AF_INET6, part, RTM_ADD, 7);
+        unsigned char expected[16];
+        inet_pton(AF_INET6, part == 8 ? "64:ff9b::" : "64:ff9b:1::", expected);
+        if (memcmp(buffer + sizeof(struct rt_msghdr) + 8, expected, 16)) return 12;
+        unsigned char *mask = buffer + sizeof(struct rt_msghdr) + sizeof(struct sockaddr_in6) + sizeof(struct sockaddr_dl) + 8;
+        for (int byte = 0; byte < 16; byte++) if (mask[byte] != (byte < (part == 8 ? 12 : 6) ? 255 : 0)) return 13;
     }
     unsigned loopback = if_nametoindex("lo0");
     if (!loopback || rtif("127.0.0.1") != loopback || rtif("::1") != loopback) return 7;
-    puts("TunProxy parameter, IPv4/IPv6 route encoding and kernel query checks passed");
+    puts("TunProxy parameters, non-zero IPv4/IPv6 and NAT64 route coverage, and kernel query checks passed");
     return 0;
 }
 #endif
@@ -122,12 +144,14 @@ static int rtxchg(unsigned char *buffer, size_t size) {
 
 #ifndef TP_CHECK
 /* 添加或撤回本接口的路由。 */
-static int rtset(int family, int upper, int action, unsigned index) {
+static int rtset(unsigned route, int action, unsigned index) {
     unsigned char buffer[512];
-    size_t size = rtmsg(buffer, family, upper, action, index);
+    int family = route < RT4COUNT ? AF_INET : AF_INET6;
+    int part = route < RT4COUNT ? route : route - RT4COUNT;
+    size_t size = rtmsg(buffer, family, part, action, index);
     int result = rtxchg(buffer, size);
-    if (result) fprintf(stderr, "route %s IPv%d half %d on interface %u: %s (errno=%d)\n",
-        action == RTM_ADD ? "add" : "delete", family == AF_INET ? 4 : 6, upper, index, strerror(errno), errno);
+    if (result) fprintf(stderr, "route %s IPv%d part %d on interface %u: %s (errno=%d)\n",
+        action == RTM_ADD ? "add" : "delete", family == AF_INET ? 4 : 6, part, index, strerror(errno), errno);
     return result;
 }
 #endif
@@ -281,8 +305,8 @@ int main(int argc, char **argv) {
     int threaderr = pthread_create(&worker, NULL, fwd, NULL);
     if (threaderr) { fprintf(stderr, "forwarder thread: %s\n", strerror(threaderr)); goto cleanup; }
     started = 1;
-    for (unsigned i = 0; i < 4; i++) {
-        if (rtset(i < 2 ? AF_INET : AF_INET6, i % 2, RTM_ADD, index)) goto cleanup;
+    for (unsigned i = 0; i < RTCOUNT; i++) {
+        if (rtset(i, RTM_ADD, index)) goto cleanup;
         installed++;
     }
     if (dnsset(ifname)) goto cleanup;
@@ -298,7 +322,7 @@ cleanup:
     dnsclr();
     while (installed) {
         unsigned i = --installed;
-        rtset(i < 2 ? AF_INET : AF_INET6, i % 2, RTM_DELETE, index);
+        rtset(i, RTM_DELETE, index);
     }
     if (started) {
         hev_socks5_tunnel_quit();

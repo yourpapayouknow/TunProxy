@@ -170,9 +170,16 @@ int main(void) {
     assert(rtif("fd7a:115c:a1e0::1") == 7 && reads == 4);
     notices = 0;
     routeerr = EEXIST;
-    assert(rtset(AF_INET, 0, RTM_ADD, 7) == -1 && errno == EEXIST);
+    assert(rtset(0, RTM_ADD, 7) == -1 && errno == EEXIST);
     routeerr = 0;
-    assert(rtset(AF_INET6, 1, RTM_DELETE, 7) == 0);
+    for (unsigned i = 0; i < RTCOUNT; i++) {
+        assert(rtset(i, RTM_ADD, 7) == 0);
+        unsigned offset = i < RT4COUNT ? 4 : 8;
+        unsigned width = i < RT4COUNT ? 4 : 16;
+        unsigned char zero[16] = {0};
+        assert(memcmp(request + sizeof(struct rt_msghdr) + offset, zero, width));
+    }
+    for (unsigned i = RTCOUNT; i > 0; i--) assert(rtset(i - 1, RTM_DELETE, 7) == 0);
     readerr = EAGAIN;
     assert(rtif("100.64.0.1") == 0 && errno == EAGAIN);
     readerr = 0;
