@@ -28,6 +28,8 @@ TunProxy面向已安装TrollStore、使用Tunailscale连接尾网的iPhone与iPa
 
 ## 传统开始
 
+从[最新正式版](https://github.com/yourpapayouknow/TunProxy/releases/latest)下载`TunProxy.tipa`，通过TrollStore安装。
+
 设备须运行iOS或iPadOS15.0以上、处于TrollStore支持的系统版本，并已安装TrollStore和[Tunailscale](https://github.com/yourpapayouknow/Tunailscale)。远端代理须支持SOCKS5及UDP转发，并允许尾网设备访问其监听端口。
 
 源码构建需要macOS、Xcode及iOS SDK、Xcode命令行工具、Git、Make和Homebrew。构建脚本固定转发依赖的源码提交，首次运行需要联网。
