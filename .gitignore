@@ -1,0 +1,8 @@
+build/
+dist/
+refrence/
+history/
+.codegraph/
+.DS_Store
+*.o
+*.tipa

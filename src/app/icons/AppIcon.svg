@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>TunProxy</title>
+  <desc>海沫绿双向箭头穿过独立通道。</desc>
+  <rect width="512" height="512" fill="#090A0A"/>
+  <rect x="176" y="88" width="160" height="336" rx="80" fill="#18181B" stroke="#3F3F46" stroke-width="20"/>
+  <g fill="none" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M104 192H400M352 144l48 48-48 48" stroke="#2DD4BF"/>
+    <path d="M408 320H112M160 272l-48 48 48 48" stroke="#14B8A6"/>
+  </g>
+</svg>
